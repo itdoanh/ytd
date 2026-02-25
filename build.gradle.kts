@@ -1,5 +1,5 @@
 // File cấu hình chung cho cả dự án
 plugins {
-    // Dùng AGP 7.4.2 để build với Java 8-11
-    id("com.android.application") version "7.4.2" apply false
+    // Dùng AGP 8.2.0 để build với Java 11
+    id("com.android.application") version "8.2.0" apply false
 }
