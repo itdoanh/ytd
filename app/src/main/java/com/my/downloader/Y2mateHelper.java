@@ -23,31 +23,56 @@ public class Y2mateHelper {
     
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
     
-    // Multiple API endpoints for fallback
+    // Multiple API endpoints for fallback (ordered by reliability)
     private static final String[] API_DOMAINS = {
+        "https://api.cobalt.tools",   // Cobalt API (most reliable 2026)
         "https://yt1s.ltd",           // Y2mate alternative 1
         "https://www.yt1s.com",       // Y2mate alternative 2
         "https://ytmp3.nu",           // Y2mate alternative 3
-        "https://api.cobalt.tools",   // Cobalt API
+        "https://y2mate.is",          // Y2mate alternative 4
+        "https://y2meta.com",         // Y2meta API
     };
 
     private static final String YT1S_SEARCH_PATH = "/api/ajaxSearch";
     private static final String COBALT_API_URL = "https://api.cobalt.tools/api/json";
     
+    // Retry configuration
+    private static final int MAX_RETRIES = 3;
+    private static final int INITIAL_RETRY_DELAY_MS = 1000;
+    
+    // Cache for successful API endpoints
     private static int currentDomainIndex = 0;
+    private static long lastSuccessTime = 0;
+    private static final long CACHE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes
 
     public interface ApiCallback { void onSuccess(VideoItem item); void onError(String msg); }
     public interface ConvertCallback { void onSuccess(String dlink); void onError(String msg); }
     public interface PingCallback { void onResult(boolean isOnline, String log); }
     public interface MetaCallback { void onSuccess(String title, String thumbUrl); void onError(String msg); }
 
-    // Extract video ID from YouTube URL
+    // Extract video ID from YouTube URL (advanced pattern matching)
     private static String extractVideoId(String url) {
-        Pattern pattern = Pattern.compile("(?:youtube\\.com/watch\\?v=|youtu\\.be/)([a-zA-Z0-9_-]{11})");
-        Matcher matcher = pattern.matcher(url);
-        if (matcher.find()) {
-            return matcher.group(1);
+        // Support multiple YouTube URL formats
+        String[] patterns = {
+            "(?:youtube\\.com/watch\\?v=)([a-zA-Z0-9_-]{11})",           // Standard
+            "(?:youtu\\.be/)([a-zA-Z0-9_-]{11})",                        // Short URL
+            "(?:youtube\\.com/embed/)([a-zA-Z0-9_-]{11})",               // Embed
+            "(?:youtube\\.com/v/)([a-zA-Z0-9_-]{11})",                   // Old embed
+            "(?:youtube\\.com/watch\\?.*&v=)([a-zA-Z0-9_-]{11})",       // With other params
+            "(?:m\\.youtube\\.com/watch\\?v=)([a-zA-Z0-9_-]{11})",       // Mobile
+        };
+        
+        for (String patternStr : patterns) {
+            Pattern pattern = Pattern.compile(patternStr);
+            Matcher matcher = pattern.matcher(url);
+            if (matcher.find()) {
+                String videoId = matcher.group(1);
+                LogManager.log("VIDEO_ID", "Extracted: " + videoId + " from " + url);
+                return videoId;
+            }
         }
+        
+        LogManager.logError("VIDEO_ID", "Cannot extract from: " + url);
         return null;
     }
 
@@ -197,7 +222,7 @@ public class Y2mateHelper {
         });
     }
 
-    // 2. Analyze video using multiple API methods
+    // 2. Analyze video using multiple API methods with retry
     public static void analyze(VideoItem item, ApiCallback cb) {
         String videoId = extractVideoId(item.url);
         LogManager.log("ANALYZE", "URL: " + item.url + " -> VideoID: " + videoId);
@@ -207,9 +232,33 @@ public class Y2mateHelper {
             return;
         }
         
+        // Check if cached API is still valid
+        long now = System.currentTimeMillis();
+        if (now - lastSuccessTime > CACHE_VALIDITY_MS) {
+            LogManager.log("ANALYZE", "Cache expired, resetting to best API");
+            currentDomainIndex = 0;
+        }
+        
         LogManager.log("ANALYZE", "Sử dụng API: " + API_DOMAINS[currentDomainIndex]);
+        analyzeWithRetry(item, videoId, cb, 0);
+    }
+    
+    private static void analyzeWithRetry(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
+        if (retryCount >= MAX_RETRIES) {
+            LogManager.logError("ANALYZE", "Max retries reached for current API");
+            tryNextDomain(item, cb);
+            return;
+        }
+        
+        if (retryCount > 0) {
+            int delay = INITIAL_RETRY_DELAY_MS * (int)Math.pow(2, retryCount - 1);
+            LogManager.log("ANALYZE", "Retry #" + retryCount + " sau " + delay + "ms");
+            mainHandler.postDelayed(() -> analyzeWithRetry(item, videoId, cb, retryCount), delay);
+            return;
+        }
+        
         // Try Cobalt API first (most reliable for 2026)
-        if (currentDomainIndex == 3) {
+        if (API_DOMAINS[currentDomainIndex].contains("cobalt")) {
             analyzeCobalt(item, videoId, cb);
         } else {
             analyzeYT1S(item, videoId, cb);
@@ -327,6 +376,7 @@ public class Y2mateHelper {
                     }
                     
                     item.isReady = true;
+                    lastSuccessTime = System.currentTimeMillis();
                     LogManager.logSuccess("YT1S_ANALYZE", "Phân tích thành công: " + item.title);
                     mainHandler.post(() -> cb.onSuccess(item));
                     
@@ -415,6 +465,7 @@ public class Y2mateHelper {
                     }
                     
                     item.isReady = true;
+                    lastSuccessTime = System.currentTimeMillis();
                     LogManager.logSuccess("COBALT", "Phân tích thành công: " + item.title);
                     mainHandler.post(() -> cb.onSuccess(item));
                     
@@ -429,10 +480,103 @@ public class Y2mateHelper {
     private static void tryNextDomain(VideoItem item, ApiCallback cb) {
         currentDomainIndex++;
         if (currentDomainIndex >= API_DOMAINS.length) {
+            LogManager.logError("ANALYZE", "Tất cả " + API_DOMAINS.length + " API đều thất bại");
             currentDomainIndex = 0;
-            mainHandler.post(() -> cb.onError("❌ Tất cả API đều thất bại. Thử lại sau."));
+            // Last resort: try web scraping
+            tryWebScraping(item, cb);
         } else {
+            LogManager.log("ANALYZE", "Chuyển sang API tiếp theo: " + API_DOMAINS[currentDomainIndex]);
             analyze(item, cb);
+        }
+    }
+    
+    // Fallback: Web scraping when all APIs fail
+    private static void tryWebScraping(VideoItem item, ApiCallback cb) {
+        LogManager.log("WEB_SCRAPE", "Thử scrape web cho video: " + item.vid);
+        
+        // Try multiple web sources
+        String[] webSources = {
+            "https://www.y2mate.com/youtube/" + item.vid,
+            "https://ytmp3.cc/en/?q=" + item.vid,
+            "https://yt5s.com/en/" + item.vid
+        };
+        
+        scrapeWebSource(webSources, 0, item, cb);
+    }
+    
+    private static void scrapeWebSource(String[] sources, int index, VideoItem item, ApiCallback cb) {
+        if (index >= sources.length) {
+            LogManager.logError("WEB_SCRAPE", "Tất cả web sources đều thất bại");
+            mainHandler.post(() -> cb.onError("❌ Không thể lấy thông tin video. Vui lòng thử lại sau."));
+            return;
+        }
+        
+        String url = sources[index];
+        LogManager.logRequest(url, "GET", "Web scraping");
+        
+        Request req = new Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .build();
+        
+        client.newCall(req).enqueue(new okhttp3.Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                LogManager.logError("WEB_SCRAPE", "Failed " + url + ": " + e.getMessage());
+                scrapeWebSource(sources, index + 1, item, cb);
+            }
+            
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    String html = response.body() != null ? response.body().string() : "";
+                    response.close();
+                    
+                    LogManager.log("WEB_SCRAPE", "Received HTML (" + html.length() + " bytes)");
+                    
+                    // Parse HTML for download links (basic regex patterns)
+                    parseHtmlForLinks(html, item, cb, sources, index);
+                    
+                } catch (Exception e) {
+                    LogManager.logError("WEB_SCRAPE", "Parse error: " + e.getMessage());
+                    scrapeWebSource(sources, index + 1, item, cb);
+                }
+            }
+        });
+    }
+    
+    private static void parseHtmlForLinks(String html, VideoItem item, ApiCallback cb, String[] sources, int index) {
+        // Look for common patterns in download pages
+        String[] mp4Patterns = {
+            "data-quality=\"(\\d+p?)\"[^>]*href=\"([^\"]+\\.mp4[^\"]*)\"",
+            "quality[\"']:\\s*[\"'](\\d+p?)[\"'][^}]*url[\"']:\\s*[\"']([^\"']+)",
+            "<a[^>]*download[^>]*>.*?(\\d+p?).*?href=\"([^\"]+)\""
+        };
+        
+        boolean foundAny = false;
+        for (String patternStr : mp4Patterns) {
+            Pattern pattern = Pattern.compile(patternStr);
+            Matcher matcher = pattern.matcher(html);
+            while (matcher.find() && matcher.groupCount() >= 2) {
+                String quality = matcher.group(1);
+                String url = matcher.group(2);
+                if (url.startsWith("http")) {
+                    item.mp4Formats.put(quality, url);
+                    foundAny = true;
+                    LogManager.log("WEB_SCRAPE", "Found MP4: " + quality + " -> " + url.substring(0, Math.min(50, url.length())));
+                }
+            }
+        }
+        
+        if (foundAny) {
+            item.isReady = true;
+            lastSuccessTime = System.currentTimeMillis();
+            LogManager.logSuccess("WEB_SCRAPE", "Tìm thấy " + item.mp4Formats.size() + " định dạng");
+            mainHandler.post(() -> cb.onSuccess(item));
+        } else {
+            LogManager.logError("WEB_SCRAPE", "Không tìm thấy link trong HTML");
+            scrapeWebSource(sources, index + 1, item, cb);
         }
     }
 
