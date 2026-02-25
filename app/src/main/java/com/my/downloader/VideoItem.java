@@ -15,6 +15,6 @@ public class VideoItem {
 
     public VideoItem(String url) {
         this.url = url;
-        this.title = "Đang lấy dữ liệu..."; 
+        this.title = "Đang lấy tiêu đề..."; 
     }
 }

@@ -1,7 +1,4 @@
-cd /workspaces/ytd
-git add .
-git commit -m "feat: Thêm hệ thống logging debug chi tiết"
-git push origin mainpackage com.my.downloader;
+package com.my.downloader;
 
 import android.os.Handler;
 import android.os.Looper;
@@ -10,6 +7,8 @@ import org.json.JSONObject;
 import org.json.JSONArray;
 import org.json.JSONException;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -32,12 +31,16 @@ public class Y2mateHelper {
         "https://ytmp3.nu",           // Y2mate alternative 3
         "https://api.cobalt.tools",   // Cobalt API
     };
+
+    private static final String YT1S_SEARCH_PATH = "/api/ajaxSearch";
+    private static final String COBALT_API_URL = "https://api.cobalt.tools/api/json";
     
     private static int currentDomainIndex = 0;
 
     public interface ApiCallback { void onSuccess(VideoItem item); void onError(String msg); }
     public interface ConvertCallback { void onSuccess(String dlink); void onError(String msg); }
     public interface PingCallback { void onResult(boolean isOnline, String log); }
+    public interface MetaCallback { void onSuccess(String title, String thumbUrl); void onError(String msg); }
 
     // Extract video ID from YouTube URL
     private static String extractVideoId(String url) {
@@ -47,6 +50,57 @@ public class Y2mateHelper {
             return matcher.group(1);
         }
         return null;
+    }
+
+    public static String extractVideoIdFromUrl(String url) {
+        return extractVideoId(url);
+    }
+
+    public static void fetchYouTubeMeta(String url, String videoId, MetaCallback cb) {
+        String oembedUrl = "https://www.youtube.com/oembed?format=json&url="
+                + URLEncoder.encode(url, StandardCharsets.UTF_8);
+        LogManager.logRequest(oembedUrl, "GET", "-");
+
+        Request req = new Request.Builder()
+                .url(oembedUrl)
+                .addHeader("User-Agent", "Mozilla/5.0 (Android 12)")
+                .build();
+
+        client.newCall(req).enqueue(new okhttp3.Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                LogManager.logError("YT_META", "Network error: " + e.getMessage());
+                mainHandler.post(() -> cb.onError("❌ Lỗi lấy tiêu đề: " + e.getMessage()));
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    String resBody = response.body() != null ? response.body().string() : "";
+                    response.close();
+                    LogManager.logResponse(oembedUrl, response.code(), resBody);
+                    if (!response.isSuccessful()) {
+                        LogManager.logError("YT_META", "HTTP " + response.code());
+                        mainHandler.post(() -> cb.onError("❌ Lỗi lấy tiêu đề: HTTP " + response.code()));
+                        return;
+                    }
+
+                    JSONObject json = new JSONObject(resBody);
+                    String title = json.optString("title", "");
+                    String thumb = json.optString("thumbnail_url", "");
+                    if (thumb.isEmpty() && videoId != null) {
+                        thumb = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                    }
+
+                    String finalTitle = title.isEmpty() ? "Video " + (videoId != null ? videoId : "") : title;
+                    String finalThumb = thumb;
+                    mainHandler.post(() -> cb.onSuccess(finalTitle, finalThumb));
+                } catch (Exception e) {
+                    LogManager.logError("YT_META", "Parse error: " + e.getMessage());
+                    mainHandler.post(() -> cb.onError("❌ Lỗi parse tiêu đề: " + e.getMessage()));
+                }
+            }
+        });
     }
 
     // 1. Test API availability
@@ -63,10 +117,49 @@ public class Y2mateHelper {
         }
         
         LogManager.log("API_TEST", "Đang test: " + API_DOMAINS[index]);
-        Request req = new Request.Builder()
-                .url(API_DOMAINS[index])
-                .addHeader("User-Agent", "Mozilla/5.0 (Android 12)")
-                .build();
+        boolean isCobalt = API_DOMAINS[index].contains("cobalt");
+        Request req;
+        String apiUrl;
+        if (isCobalt) {
+            JSONObject requestBody = new JSONObject();
+            try {
+                requestBody.put("url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+                requestBody.put("vCodec", "h264");
+                requestBody.put("vQuality", "720");
+                requestBody.put("aFormat", "mp3");
+            } catch (JSONException e) {
+                LogManager.logError("API_TEST", "Không tạo được request test cho Cobalt");
+                testDomain(index + 1, cb);
+                return;
+            }
+            apiUrl = COBALT_API_URL;
+            RequestBody body = RequestBody.create(
+                requestBody.toString(),
+                MediaType.parse("application/json")
+            );
+            LogManager.logRequest(apiUrl, "POST", requestBody.toString());
+            req = new Request.Builder()
+                    .url(apiUrl)
+                    .post(body)
+                    .addHeader("Accept", "application/json")
+                    .addHeader("Content-Type", "application/json")
+                    .build();
+        } else {
+            apiUrl = API_DOMAINS[index] + YT1S_SEARCH_PATH;
+            FormBody body = new FormBody.Builder()
+                    .add("url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+                    .add("ajax", "1")
+                    .add("lang", "en")
+                    .build();
+            LogManager.logRequest(apiUrl, "POST", "url=...&ajax=1&lang=en");
+            req = new Request.Builder()
+                    .url(apiUrl)
+                    .post(body)
+                    .addHeader("User-Agent", "Mozilla/5.0 (Android 12)")
+                    .addHeader("X-Requested-With", "XMLHttpRequest")
+                    .addHeader("Content-Type", "application/x-www-form-urlencoded")
+                    .build();
+        }
         
         client.newCall(req).enqueue(new okhttp3.Callback() {
             @Override 
@@ -78,9 +171,15 @@ public class Y2mateHelper {
             @Override 
             public void onResponse(Call call, Response response) throws IOException {
                 int code = response.code();
+                String resBody = response.body() != null ? response.body().string() : "";
                 response.close();
+                LogManager.logResponse(API_DOMAINS[index], code, resBody);
                 LogManager.log("API_TEST", API_DOMAINS[index] + " response code: " + code);
-                if (code == 200 || code == 403) {
+                if (code == 404) {
+                    testDomain(index + 1, cb);
+                    return;
+                }
+                if (code == 200 || code == 400 || code == 403) {
                     currentDomainIndex = index;
                     LogManager.logSuccess("API_TEST", "API ONLINE: " + API_DOMAINS[index]);
                     mainHandler.post(() -> cb.onResult(true, "✅ API ONLINE: " + API_DOMAINS[index]));
@@ -113,7 +212,7 @@ public class Y2mateHelper {
     // Method 1: YT1S API (Y2mate alternative)
     private static void analyzeYT1S(VideoItem item, String videoId, ApiCallback cb) {
         String domain = API_DOMAINS[currentDomainIndex];
-        String apiUrl = domain + "/api/ajaxSearch";
+        String apiUrl = domain + YT1S_SEARCH_PATH;
         
         FormBody body = new FormBody.Builder()
                 .add("url", "https://www.youtube.com/watch?v=" + videoId)
@@ -251,8 +350,9 @@ public class Y2mateHelper {
             MediaType.parse("application/json")
         );
         
+        LogManager.logRequest(COBALT_API_URL, "POST", requestBody.toString());
         Request req = new Request.Builder()
-                .url("https://api.cobalt.tools/api/json")
+                .url(COBALT_API_URL)
                 .post(body)
                 .addHeader("Accept", "application/json")
                 .addHeader("Content-Type", "application/json")
@@ -261,20 +361,30 @@ public class Y2mateHelper {
         client.newCall(req).enqueue(new okhttp3.Callback() {
             @Override 
             public void onFailure(Call call, IOException e) { 
+                LogManager.logError("COBALT", "Network error: " + e.getMessage());
                 mainHandler.post(() -> cb.onError("❌ Cobalt API lỗi: " + e.getMessage())); 
             }
             
             @Override 
             public void onResponse(Call call, Response response) throws IOException {
                 try {
-                    String resBody = response.body().string();
+                    String resBody = response.body() != null ? response.body().string() : "";
                     response.close();
+                    LogManager.logResponse(COBALT_API_URL, response.code(), resBody);
+                    if (!response.isSuccessful()) {
+                        LogManager.logError("COBALT", "HTTP " + response.code());
+                    }
                     
                     JSONObject json = new JSONObject(resBody);
-                    
+
                     item.vid = videoId;
-                    item.title = json.optString("filename", "Video_" + videoId);
-                    item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/maxresdefault.jpg";
+                    String cobaltTitle = json.optString("filename", "");
+                    if (!cobaltTitle.isEmpty()) {
+                        item.title = cobaltTitle;
+                    }
+                    if (item.thumbUrl == null || item.thumbUrl.isEmpty()) {
+                        item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                    }
                     
                     String url = json.optString("url", "");
                     if (!url.isEmpty()) {
@@ -292,14 +402,17 @@ public class Y2mateHelper {
                     }
                     
                     if (item.mp4Formats.isEmpty() && item.mp3Formats.isEmpty()) {
+                        LogManager.logError("COBALT", "Không lấy được link download");
                         mainHandler.post(() -> cb.onError("❌ Không lấy được link download"));
                         return;
                     }
                     
                     item.isReady = true;
+                    LogManager.logSuccess("COBALT", "Phân tích thành công: " + item.title);
                     mainHandler.post(() -> cb.onSuccess(item));
                     
                 } catch (Exception e) {
+                    LogManager.logError("COBALT", "Lỗi parse: " + e.getMessage());
                     mainHandler.post(() -> cb.onError("❌ Lỗi parse Cobalt: " + e.getMessage()));
                 }
             }

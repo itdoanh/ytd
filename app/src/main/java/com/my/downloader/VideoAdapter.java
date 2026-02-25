@@ -35,10 +35,14 @@ public class VideoAdapter extends RecyclerView.Adapter<VideoAdapter.VideoViewHol
         if (item.isReady) {
             holder.binding.tvStatus.setText("Sẵn sàng tải");
             holder.binding.tvStatus.setTextColor(0xFF4CAF50);
-            Glide.with(holder.itemView.getContext()).load(item.thumbUrl).into(holder.binding.imgThumb);
         } else {
             holder.binding.tvStatus.setText("Chờ nhấn Start...");
             holder.binding.tvStatus.setTextColor(0xFF757575);
+        }
+
+        if (item.thumbUrl != null && !item.thumbUrl.isEmpty()) {
+            Glide.with(holder.itemView.getContext()).load(item.thumbUrl).into(holder.binding.imgThumb);
+        } else {
             holder.binding.imgThumb.setImageDrawable(null);
         }
 

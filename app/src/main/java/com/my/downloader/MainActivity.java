@@ -66,9 +66,33 @@ public class MainActivity extends AppCompatActivity {
         binding.btnAdd.setOnClickListener(v -> {
             String url = binding.edtUrl.getText().toString();
             if(url.contains("youtu")) {
-                videoList.add(new VideoItem(url));
-                adapter.notifyItemInserted(videoList.size()-1);
+                VideoItem item = new VideoItem(url);
+                String videoId = Y2mateHelper.extractVideoIdFromUrl(url);
+                if (videoId != null) {
+                    item.vid = videoId;
+                    item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                    item.title = "Đang lấy tiêu đề...";
+                }
+                videoList.add(item);
+                int pos = videoList.size() - 1;
+                adapter.notifyItemInserted(pos);
                 binding.edtUrl.setText("");
+                if (videoId != null) {
+                    Y2mateHelper.fetchYouTubeMeta(url, videoId, new Y2mateHelper.MetaCallback() {
+                        @Override public void onSuccess(String title, String thumbUrl) {
+                            item.title = title;
+                            if (thumbUrl != null && !thumbUrl.isEmpty()) {
+                                item.thumbUrl = thumbUrl;
+                            }
+                            adapter.notifyItemChanged(pos);
+                        }
+
+                        @Override public void onError(String msg) {
+                            item.title = "Không lấy được tiêu đề";
+                            adapter.notifyItemChanged(pos);
+                        }
+                    });
+                }
             } else Toast.makeText(this, "Link không hợp lệ!", Toast.LENGTH_SHORT).show();
         });
 
