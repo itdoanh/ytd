@@ -98,14 +98,29 @@ public class MainActivity extends AppCompatActivity {
 
         // 4. NÚT START (GỌI ANALYZE)
         binding.btnStartProcess.setOnClickListener(v -> {
+            binding.progressContainer.setVisibility(android.view.View.VISIBLE);
+            binding.tvProgressStatus.setText("🚀 Bắt đầu phân tích...");
+            
             for(int i=0; i<videoList.size(); i++) {
                 int pos = i;
                 VideoItem item = videoList.get(i);
                 if(!item.isReady) {
                     Y2mateHelper.analyze(item, new Y2mateHelper.ApiCallback() {
-                        @Override public void onSuccess(VideoItem result) { adapter.notifyItemChanged(pos); }
-                        @Override public void onError(String msg) { 
+                        @Override 
+                        public void onSuccess(VideoItem result) { 
+                            adapter.notifyItemChanged(pos);
+                            binding.progressContainer.setVisibility(android.view.View.GONE);
+                        }
+                        
+                        @Override 
+                        public void onError(String msg) { 
+                            binding.progressContainer.setVisibility(android.view.View.GONE);
                             showErrorLog("Log lỗi Analyze API", msg); 
+                        }
+                        
+                        @Override
+                        public void onProgress(String status) {
+                            binding.tvProgressStatus.setText(status);
                         }
                     });
                 }

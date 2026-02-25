@@ -25,16 +25,20 @@ public class Y2mateHelper {
     
     // Multiple API endpoints for fallback (ordered by reliability)
     private static final String[] API_DOMAINS = {
-        "https://api.cobalt.tools",   // Cobalt API (most reliable 2026)
+        "https://co.wuk.sh",          // Cobalt API v9 (official 2026)
+        "https://api.cobalt.tools",   // Cobalt fallback
         "https://yt1s.ltd",           // Y2mate alternative 1
         "https://www.yt1s.com",       // Y2mate alternative 2
         "https://ytmp3.nu",           // Y2mate alternative 3
         "https://y2mate.is",          // Y2mate alternative 4
         "https://y2meta.com",         // Y2meta API
+        "https://ssyoutube.com",      // SS YouTube
+        "https://en.savefrom.net",   // SaveFrom
     };
 
     private static final String YT1S_SEARCH_PATH = "/api/ajaxSearch";
-    private static final String COBALT_API_URL = "https://api.cobalt.tools/api/json";
+    private static final String COBALT_API_V9 = "https://co.wuk.sh/api/json";
+    private static final String COBALT_API_V7 = "https://api.cobalt.tools/api/json";
     
     // Retry configuration
     private static final int MAX_RETRIES = 3;
@@ -45,7 +49,7 @@ public class Y2mateHelper {
     private static long lastSuccessTime = 0;
     private static final long CACHE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes
 
-    public interface ApiCallback { void onSuccess(VideoItem item); void onError(String msg); }
+    public interface ApiCallback { void onSuccess(VideoItem item); void onError(String msg); void onProgress(String status); }
     public interface ConvertCallback { void onSuccess(String dlink); void onError(String msg); }
     public interface PingCallback { void onResult(boolean isOnline, String log); }
     public interface MetaCallback { void onSuccess(String title, String thumbUrl); void onError(String msg); }
@@ -149,22 +153,32 @@ public class Y2mateHelper {
         }
         
         LogManager.log("API_TEST", "Đang test: " + API_DOMAINS[index]);
-        boolean isCobalt = API_DOMAINS[index].contains("cobalt");
+        boolean isCobalt = API_DOMAINS[index].contains("cobalt") || API_DOMAINS[index].contains("wuk.sh");
         Request req;
         String apiUrl;
         if (isCobalt) {
             JSONObject requestBody = new JSONObject();
             try {
                 requestBody.put("url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
-                requestBody.put("vCodec", "h264");
-                requestBody.put("vQuality", "720");
-                requestBody.put("aFormat", "mp3");
+                
+                // Use appropriate parameters based on API domain
+                if (API_DOMAINS[index].contains("wuk.sh")) {
+                    // Cobalt v9
+                    requestBody.put("videoQuality", "720");
+                    requestBody.put("audioFormat", "mp3");
+                    apiUrl = COBALT_API_V9;
+                } else {
+                    // Cobalt v7 (deprecated but test anyway)
+                    requestBody.put("vCodec", "h264");
+                    requestBody.put("vQuality", "720");
+                    requestBody.put("aFormat", "mp3");
+                    apiUrl = COBALT_API_V7;
+                }
             } catch (JSONException e) {
                 LogManager.logError("API_TEST", "Không tạo được request test cho Cobalt");
                 testDomain(index + 1, cb);
                 return;
             }
-            apiUrl = COBALT_API_URL;
             RequestBody body = RequestBody.create(
                 requestBody.toString(),
                 MediaType.parse("application/json")
@@ -175,6 +189,7 @@ public class Y2mateHelper {
                     .post(body)
                     .addHeader("Accept", "application/json")
                     .addHeader("Content-Type", "application/json")
+                    .addHeader("User-Agent", "Mozilla/5.0")
                     .build();
         } else {
             apiUrl = API_DOMAINS[index] + YT1S_SEARCH_PATH;
@@ -240,7 +255,16 @@ public class Y2mateHelper {
         }
         
         LogManager.log("ANALYZE", "Sử dụng API: " + API_DOMAINS[currentDomainIndex]);
+        notifyProgress(cb, "🔍 Đang phân tích video...");
         analyzeWithRetry(item, videoId, cb, 0);
+    }
+    
+    private static void notifyProgress(ApiCallback cb, String message) {
+        try {
+            cb.onProgress(message);
+        } catch (Exception e) {
+            // Ignore if not implemented
+        }
     }
     
     private static void analyzeWithRetry(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
@@ -253,14 +277,21 @@ public class Y2mateHelper {
         if (retryCount > 0) {
             int delay = INITIAL_RETRY_DELAY_MS * (int)Math.pow(2, retryCount - 1);
             LogManager.log("ANALYZE", "Retry #" + retryCount + " sau " + delay + "ms");
+            notifyProgress(cb, "⏳ Thử lại... (" + retryCount + "/" + MAX_RETRIES + ")");
             mainHandler.postDelayed(() -> analyzeWithRetry(item, videoId, cb, retryCount), delay);
             return;
         }
         
-        // Try Cobalt API first (most reliable for 2026)
-        if (API_DOMAINS[currentDomainIndex].contains("cobalt")) {
+        // Determine API type and use appropriate method
+        String domain = API_DOMAINS[currentDomainIndex];
+        if (domain.contains("cobalt") || domain.contains("wuk.sh")) {
+            notifyProgress(cb, "🌐 Kết nối Cobalt API...");
             analyzeCobalt(item, videoId, cb);
+        } else if (domain.contains("savefrom") || domain.contains("ssyoutube")) {
+            notifyProgress(cb, "🌐 Kết nối " + domain + "...");
+            analyzeSavefrom(item, videoId, cb);
         } else {
+            notifyProgress(cb, "🌐 Kết nối Y2Mate API...");
             analyzeYT1S(item, videoId, cb);
         }
     }
@@ -389,14 +420,25 @@ public class Y2mateHelper {
         });
     }
     
-    // Method 2: Cobalt API (modern, reliable)
+    // Method 2: Cobalt API v9 (modern, reliable)
     private static void analyzeCobalt(VideoItem item, String videoId, ApiCallback cb) {
+        String domain = API_DOMAINS[currentDomainIndex];
+        String apiUrl = domain.contains("wuk.sh") ? COBALT_API_V9 : COBALT_API_V7;
+        
         JSONObject requestBody = new JSONObject();
         try {
             requestBody.put("url", "https://www.youtube.com/watch?v=" + videoId);
-            requestBody.put("vCodec", "h264");
-            requestBody.put("vQuality", "1080");
-            requestBody.put("aFormat", "mp3");
+            
+            // Cobalt v9 uses different parameters
+            if (apiUrl.equals(COBALT_API_V9)) {
+                requestBody.put("videoQuality", "1080");
+                requestBody.put("audioFormat", "mp3");
+                requestBody.put("filenameStyle", "pretty");
+            } else {
+                requestBody.put("vCodec", "h264");
+                requestBody.put("vQuality", "1080");
+                requestBody.put("aFormat", "mp3");
+            }
         } catch (JSONException e) {
             mainHandler.post(() -> cb.onError("❌ Lỗi tạo request"));
             return;
@@ -407,12 +449,13 @@ public class Y2mateHelper {
             MediaType.parse("application/json")
         );
         
-        LogManager.logRequest(COBALT_API_URL, "POST", requestBody.toString());
+        LogManager.logRequest(apiUrl, "POST", requestBody.toString());
         Request req = new Request.Builder()
-                .url(COBALT_API_URL)
+                .url(apiUrl)
                 .post(body)
                 .addHeader("Accept", "application/json")
                 .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", "Mozilla/5.0")
                 .build();
 
         client.newCall(req).enqueue(new okhttp3.Callback() {
@@ -426,13 +469,29 @@ public class Y2mateHelper {
             public void onResponse(Call call, Response response) throws IOException {
                 try {
                     String resBody = response.body() != null ? response.body().string() : "";
+                    int statusCode = response.code();
                     response.close();
-                    LogManager.logResponse(COBALT_API_URL, response.code(), resBody);
-                    if (!response.isSuccessful()) {
-                        LogManager.logError("COBALT", "HTTP " + response.code());
-                    }
+                    LogManager.logResponse(apiUrl, statusCode, resBody);
                     
                     JSONObject json = new JSONObject(resBody);
+                    
+                    // Check for API errors
+                    String status = json.optString("status", "");
+                    if ("error".equals(status)) {
+                        String errorText = json.optString("text", "Unknown error");
+                        LogManager.logError("COBALT", "API Error: " + errorText);
+                        if (errorText.contains("shut down") || errorText.contains("deprecated")) {
+                            // API version deprecated, try next domain
+                            tryNextDomain(item, cb);
+                            return;
+                        }
+                    }
+                    
+                    if (!response.isSuccessful() && statusCode != 400) {
+                        LogManager.logError("COBALT", "HTTP " + statusCode);
+                        tryNextDomain(item, cb);
+                        return;
+                    }
 
                     item.vid = videoId;
                     String cobaltTitle = json.optString("filename", "");
@@ -483,16 +542,58 @@ public class Y2mateHelper {
             LogManager.logError("ANALYZE", "Tất cả " + API_DOMAINS.length + " API đều thất bại");
             currentDomainIndex = 0;
             // Last resort: try web scraping
+            notifyProgress(cb, "🔎 Thử phương pháp dự phòng...");
             tryWebScraping(item, cb);
         } else {
-            LogManager.log("ANALYZE", "Chuyển sang API tiếp theo: " + API_DOMAINS[currentDomainIndex]);
+            LogManager.log("ANALYZE", "Chuyển sang API tiếp theo (" + (currentDomainIndex + 1) + "/" + API_DOMAINS.length + "): " + API_DOMAINS[currentDomainIndex]);
+            notifyProgress(cb, "🔄 Chuyển sang nguồn khác (" + (currentDomainIndex + 1) + "/" + API_DOMAINS.length + ")...");
             analyze(item, cb);
         }
+    }
+    
+    // Method 3: SaveFrom/SSYouTube API
+    private static void analyzeSavefrom(VideoItem item, String videoId, ApiCallback cb) {
+        String url = "https://en.savefrom.net/" + videoId;
+        LogManager.logRequest(url, "GET", "Savefrom scraping");
+        
+        Request req = new Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .build();
+        
+        client.newCall(req).enqueue(new okhttp3.Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                LogManager.logError("SAVEFROM", "Network error: " + e.getMessage());
+                tryNextDomain(item, cb);
+            }
+            
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    String html = response.body() != null ? response.body().string() : "";
+                    response.close();
+                    LogManager.log("SAVEFROM", "Received HTML (" + html.length() + " bytes)");
+                    
+                    item.vid = videoId;
+                    if (item.thumbUrl == null || item.thumbUrl.isEmpty()) {
+                        item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                    }
+                    
+                    // Parse SaveFrom HTML
+                    parseHtmlForLinks(html, item, cb, null, 0);
+                } catch (Exception e) {
+                    LogManager.logError("SAVEFROM", "Parse error: " + e.getMessage());
+                    tryNextDomain(item, cb);
+                }
+            }
+        });
     }
     
     // Fallback: Web scraping when all APIs fail
     private static void tryWebScraping(VideoItem item, ApiCallback cb) {
         LogManager.log("WEB_SCRAPE", "Thử scrape web cho video: " + item.vid);
+        notifyProgress(cb, "🕷️ Đang tìm kiếm link tải...");
         
         // Try multiple web sources
         String[] webSources = {
