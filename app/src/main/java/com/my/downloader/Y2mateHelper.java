@@ -58,7 +58,7 @@ public class Y2mateHelper {
 
     public static void fetchYouTubeMeta(String url, String videoId, MetaCallback cb) {
         String oembedUrl = "https://www.youtube.com/oembed?format=json&url="
-                + URLEncoder.encode(url, StandardCharsets.UTF_8);
+                + URLEncoder.encode(url, StandardCharsets.UTF_8.name());
         LogManager.logRequest(oembedUrl, "GET", "-");
 
         Request req = new Request.Builder()
