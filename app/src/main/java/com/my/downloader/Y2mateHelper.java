@@ -172,7 +172,7 @@ public class Y2mateHelper {
         client.newCall(req).enqueue(new okhttp3.Callback() {
             @Override 
             public void onFailure(Call call, IOException e) { 
-                mainHandler.post(() -> cb.onError("❌ Convert Lỗi\Timeout: " + e.getMessage())); 
+                mainHandler.post(() -> cb.onError("❌ Convert Lỗi - Timeout: " + e.getMessage())); 
             }
             
             @Override 
