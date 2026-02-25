@@ -15,9 +15,9 @@ import java.util.regex.Matcher;
 
 public class Y2mateHelper {
     private static final OkHttpClient client = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .followRedirects(true)
             .build();
     
@@ -41,13 +41,18 @@ public class Y2mateHelper {
     private static final String COBALT_API_V7 = "https://api.cobalt.tools/api/json";
     
     // Retry configuration
-    private static final int MAX_RETRIES = 3;
-    private static final int INITIAL_RETRY_DELAY_MS = 1000;
+    private static final int MAX_RETRIES = 4;
+    private static final int INITIAL_RETRY_DELAY_MS = 1500;
     
     // Cache for successful API endpoints
     private static int currentDomainIndex = 0;
     private static long lastSuccessTime = 0;
     private static final long CACHE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes
+    private static final int MAX_FAILURES_BEFORE_COOLDOWN = 2;
+    private static final long COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+    private static final int[] domainFailureCount = new int[API_DOMAINS.length];
+    private static final long[] domainCooldownUntil = new long[API_DOMAINS.length];
+    private static final long[] domainLastSuccess = new long[API_DOMAINS.length];
 
     public interface ApiCallback { void onSuccess(VideoItem item); void onError(String msg); void onProgress(String status); }
     public interface ConvertCallback { void onSuccess(String dlink); void onError(String msg); }
@@ -212,6 +217,7 @@ public class Y2mateHelper {
             @Override 
             public void onFailure(Call call, IOException e) { 
                 LogManager.logError("API_TEST", API_DOMAINS[index] + " failed: " + e.getMessage());
+                markDomainFailure(index, "API_TEST failure");
                 testDomain(index + 1, cb);
             }
             
@@ -220,17 +226,26 @@ public class Y2mateHelper {
                 int code = response.code();
                 String resBody = response.body() != null ? response.body().string() : "";
                 response.close();
-                LogManager.logResponse(API_DOMAINS[index], code, resBody);
+                LogManager.logResponse(apiUrl, code, resBody);
                 LogManager.log("API_TEST", API_DOMAINS[index] + " response code: " + code);
+                if (resBody.contains("shut down") || resBody.contains("deprecated")) {
+                    LogManager.logError("API_TEST", "API deprecated: " + API_DOMAINS[index]);
+                    markDomainFailure(index, "API deprecated");
+                    testDomain(index + 1, cb);
+                    return;
+                }
                 if (code == 404) {
+                    markDomainFailure(index, "API 404");
                     testDomain(index + 1, cb);
                     return;
                 }
                 if (code == 200 || code == 400 || code == 403) {
                     currentDomainIndex = index;
+                    markDomainSuccess(index);
                     LogManager.logSuccess("API_TEST", "API ONLINE: " + API_DOMAINS[index]);
                     mainHandler.post(() -> cb.onResult(true, "✅ API ONLINE: " + API_DOMAINS[index]));
                 } else {
+                    markDomainFailure(index, "API status " + code);
                     testDomain(index + 1, cb);
                 }
             }
@@ -251,7 +266,8 @@ public class Y2mateHelper {
         long now = System.currentTimeMillis();
         if (now - lastSuccessTime > CACHE_VALIDITY_MS) {
             LogManager.log("ANALYZE", "Cache expired, resetting to best API");
-            currentDomainIndex = 0;
+            int healthyIndex = findNextHealthyDomain(0);
+            currentDomainIndex = healthyIndex >= 0 ? healthyIndex : 0;
         }
         
         LogManager.log("ANALYZE", "Sử dụng API: " + API_DOMAINS[currentDomainIndex]);
@@ -268,6 +284,11 @@ public class Y2mateHelper {
     }
     
     private static void analyzeWithRetry(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
+        if (isDomainInCooldown(currentDomainIndex)) {
+            notifyProgress(cb, "⚠️ Nguồn đang lỗi, chuyển nguồn...");
+            tryNextDomain(item, cb);
+            return;
+        }
         if (retryCount >= MAX_RETRIES) {
             LogManager.logError("ANALYZE", "Max retries reached for current API");
             tryNextDomain(item, cb);
@@ -286,18 +307,33 @@ public class Y2mateHelper {
         String domain = API_DOMAINS[currentDomainIndex];
         if (domain.contains("cobalt") || domain.contains("wuk.sh")) {
             notifyProgress(cb, "🌐 Kết nối Cobalt API...");
-            analyzeCobalt(item, videoId, cb);
+            analyzeCobalt(item, videoId, cb, retryCount);
         } else if (domain.contains("savefrom") || domain.contains("ssyoutube")) {
             notifyProgress(cb, "🌐 Kết nối " + domain + "...");
-            analyzeSavefrom(item, videoId, cb);
+            analyzeSavefrom(item, videoId, cb, retryCount);
         } else {
             notifyProgress(cb, "🌐 Kết nối Y2Mate API...");
-            analyzeYT1S(item, videoId, cb);
+            analyzeYT1S(item, videoId, cb, retryCount);
+        }
+    }
+
+    private static void handleAnalyzeFailure(VideoItem item, String videoId, ApiCallback cb, int retryCount, String reason) {
+        LogManager.logError("ANALYZE", reason);
+        markDomainFailure(currentDomainIndex, reason);
+        if (isDomainInCooldown(currentDomainIndex)) {
+            tryNextDomain(item, cb);
+            return;
+        }
+        int nextRetry = retryCount + 1;
+        if (nextRetry < MAX_RETRIES) {
+            analyzeWithRetry(item, videoId, cb, nextRetry);
+        } else {
+            tryNextDomain(item, cb);
         }
     }
     
     // Method 1: YT1S API (Y2mate alternative)
-    private static void analyzeYT1S(VideoItem item, String videoId, ApiCallback cb) {
+    private static void analyzeYT1S(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
         String domain = API_DOMAINS[currentDomainIndex];
         String apiUrl = domain + YT1S_SEARCH_PATH;
         
@@ -321,7 +357,7 @@ public class Y2mateHelper {
             @Override 
             public void onFailure(Call call, IOException e) { 
                 LogManager.logError("YT1S_ANALYZE", "Network error: " + e.getMessage());
-                tryNextDomain(item, cb);
+                handleAnalyzeFailure(item, videoId, cb, retryCount, "YT1S network error");
             }
             
             @Override 
@@ -330,7 +366,7 @@ public class Y2mateHelper {
                     if (!response.isSuccessful()) {
                         LogManager.logError("YT1S_ANALYZE", "HTTP " + response.code() + ": " + response.message());
                         response.close();
-                        tryNextDomain(item, cb);
+                        handleAnalyzeFailure(item, videoId, cb, retryCount, "YT1S HTTP error");
                         return;
                     }
                     
@@ -345,7 +381,7 @@ public class Y2mateHelper {
                     
                     if (!status.equals("ok")) {
                         LogManager.logError("YT1S_ANALYZE", "Status not ok: " + status);
-                        tryNextDomain(item, cb);
+                        handleAnalyzeFailure(item, videoId, cb, retryCount, "YT1S status not ok");
                         return;
                     }
                     
@@ -402,7 +438,7 @@ public class Y2mateHelper {
                     
                     if (item.mp4Formats.isEmpty() && item.mp3Formats.isEmpty()) {
                         LogManager.logError("YT1S_ANALYZE", "Không có định dạng nào được tìm thấy");
-                        tryNextDomain(item, cb);
+                        handleAnalyzeFailure(item, videoId, cb, retryCount, "YT1S no formats");
                         return;
                     }
                     
@@ -414,16 +450,17 @@ public class Y2mateHelper {
                 } catch (Exception e) {
                     LogManager.logError("YT1S_ANALYZE", "Exception: " + e.getMessage());
                     e.printStackTrace();
-                    tryNextDomain(item, cb);
+                    handleAnalyzeFailure(item, videoId, cb, retryCount, "YT1S exception");
                 }
             }
         });
     }
     
     // Method 2: Cobalt API v9 (modern, reliable)
-    private static void analyzeCobalt(VideoItem item, String videoId, ApiCallback cb) {
+    private static void analyzeCobalt(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
         String domain = API_DOMAINS[currentDomainIndex];
         String apiUrl = domain.contains("wuk.sh") ? COBALT_API_V9 : COBALT_API_V7;
+        String quality = getQualityForRetry(retryCount);
         
         JSONObject requestBody = new JSONObject();
         try {
@@ -431,12 +468,12 @@ public class Y2mateHelper {
             
             // Cobalt v9 uses different parameters
             if (apiUrl.equals(COBALT_API_V9)) {
-                requestBody.put("videoQuality", "1080");
+                requestBody.put("videoQuality", quality);
                 requestBody.put("audioFormat", "mp3");
                 requestBody.put("filenameStyle", "pretty");
             } else {
                 requestBody.put("vCodec", "h264");
-                requestBody.put("vQuality", "1080");
+                requestBody.put("vQuality", quality);
                 requestBody.put("aFormat", "mp3");
             }
         } catch (JSONException e) {
@@ -462,7 +499,7 @@ public class Y2mateHelper {
             @Override 
             public void onFailure(Call call, IOException e) { 
                 LogManager.logError("COBALT", "Network error: " + e.getMessage());
-                mainHandler.post(() -> cb.onError("❌ Cobalt API lỗi: " + e.getMessage())); 
+                handleAnalyzeFailure(item, videoId, cb, retryCount, "Cobalt network error");
             }
             
             @Override 
@@ -482,14 +519,14 @@ public class Y2mateHelper {
                         LogManager.logError("COBALT", "API Error: " + errorText);
                         if (errorText.contains("shut down") || errorText.contains("deprecated")) {
                             // API version deprecated, try next domain
-                            tryNextDomain(item, cb);
+                            handleAnalyzeFailure(item, videoId, cb, retryCount, "Cobalt deprecated");
                             return;
                         }
                     }
                     
                     if (!response.isSuccessful() && statusCode != 400) {
                         LogManager.logError("COBALT", "HTTP " + statusCode);
-                        tryNextDomain(item, cb);
+                        handleAnalyzeFailure(item, videoId, cb, retryCount, "Cobalt HTTP error");
                         return;
                     }
 
@@ -519,7 +556,7 @@ public class Y2mateHelper {
                     
                     if (item.mp4Formats.isEmpty() && item.mp3Formats.isEmpty()) {
                         LogManager.logError("COBALT", "Không lấy được link download");
-                        mainHandler.post(() -> cb.onError("❌ Không lấy được link download"));
+                        handleAnalyzeFailure(item, videoId, cb, retryCount, "Cobalt no links");
                         return;
                     }
                     
@@ -530,21 +567,30 @@ public class Y2mateHelper {
                     
                 } catch (Exception e) {
                     LogManager.logError("COBALT", "Lỗi parse: " + e.getMessage());
-                    mainHandler.post(() -> cb.onError("❌ Lỗi parse Cobalt: " + e.getMessage()));
+                    handleAnalyzeFailure(item, videoId, cb, retryCount, "Cobalt parse error");
                 }
             }
         });
     }
     
     private static void tryNextDomain(VideoItem item, ApiCallback cb) {
-        currentDomainIndex++;
-        if (currentDomainIndex >= API_DOMAINS.length) {
+        int nextIndex = findNextHealthyDomain(currentDomainIndex + 1);
+        if (nextIndex < 0) {
             LogManager.logError("ANALYZE", "Tất cả " + API_DOMAINS.length + " API đều thất bại");
-            currentDomainIndex = 0;
+            resetDomainCooldowns();
+            nextIndex = findNextHealthyDomain(0);
+            if (nextIndex < 0) {
+                currentDomainIndex = 0;
+                notifyProgress(cb, "🔎 Thử phương pháp dự phòng...");
+                tryWebScraping(item, cb);
+                return;
+            }
+            currentDomainIndex = nextIndex;
             // Last resort: try web scraping
-            notifyProgress(cb, "🔎 Thử phương pháp dự phòng...");
-            tryWebScraping(item, cb);
+            notifyProgress(cb, "🔄 Reset nguồn và thử lại...");
+            analyze(item, cb);
         } else {
+            currentDomainIndex = nextIndex;
             LogManager.log("ANALYZE", "Chuyển sang API tiếp theo (" + (currentDomainIndex + 1) + "/" + API_DOMAINS.length + "): " + API_DOMAINS[currentDomainIndex]);
             notifyProgress(cb, "🔄 Chuyển sang nguồn khác (" + (currentDomainIndex + 1) + "/" + API_DOMAINS.length + ")...");
             analyze(item, cb);
@@ -552,7 +598,7 @@ public class Y2mateHelper {
     }
     
     // Method 3: SaveFrom/SSYouTube API
-    private static void analyzeSavefrom(VideoItem item, String videoId, ApiCallback cb) {
+    private static void analyzeSavefrom(VideoItem item, String videoId, ApiCallback cb, int retryCount) {
         String url = "https://en.savefrom.net/" + videoId;
         LogManager.logRequest(url, "GET", "Savefrom scraping");
         
@@ -565,7 +611,7 @@ public class Y2mateHelper {
             @Override
             public void onFailure(Call call, IOException e) {
                 LogManager.logError("SAVEFROM", "Network error: " + e.getMessage());
-                tryNextDomain(item, cb);
+                handleAnalyzeFailure(item, videoId, cb, retryCount, "SaveFrom network error");
             }
             
             @Override
@@ -584,7 +630,7 @@ public class Y2mateHelper {
                     parseHtmlForLinks(html, item, cb, null, 0);
                 } catch (Exception e) {
                     LogManager.logError("SAVEFROM", "Parse error: " + e.getMessage());
-                    tryNextDomain(item, cb);
+                    handleAnalyzeFailure(item, videoId, cb, retryCount, "SaveFrom parse error");
                 }
             }
         });
@@ -654,6 +700,11 @@ public class Y2mateHelper {
             "quality[\"']:\\s*[\"'](\\d+p?)[\"'][^}]*url[\"']:\\s*[\"']([^\"']+)",
             "<a[^>]*download[^>]*>.*?(\\d+p?).*?href=\"([^\"]+)\""
         };
+        String[] mp3Patterns = {
+            "data-quality=\"(\\d+kbps)\"[^>]*href=\"([^\"]+\\.mp3[^\"]*)\"",
+            "audio[\"']:\\s*[\"'](\\d+kbps)[\"'][^}]*url[\"']:\\s*[\"']([^\"']+)",
+            "<a[^>]*download[^>]*>.*?(\\d+kbps).*?href=\"([^\"]+\\.mp3[^\"]*)\""
+        };
         
         boolean foundAny = false;
         for (String patternStr : mp4Patterns) {
@@ -669,15 +720,72 @@ public class Y2mateHelper {
                 }
             }
         }
+
+        for (String patternStr : mp3Patterns) {
+            Pattern pattern = Pattern.compile(patternStr);
+            Matcher matcher = pattern.matcher(html);
+            while (matcher.find() && matcher.groupCount() >= 2) {
+                String quality = matcher.group(1);
+                String url = matcher.group(2);
+                if (url.startsWith("http")) {
+                    item.mp3Formats.put("Audio " + quality, url);
+                    foundAny = true;
+                    LogManager.log("WEB_SCRAPE", "Found MP3: " + quality + " -> " + url.substring(0, Math.min(50, url.length())));
+                }
+            }
+        }
         
         if (foundAny) {
             item.isReady = true;
             lastSuccessTime = System.currentTimeMillis();
+            markDomainSuccess(currentDomainIndex);
             LogManager.logSuccess("WEB_SCRAPE", "Tìm thấy " + item.mp4Formats.size() + " định dạng");
             mainHandler.post(() -> cb.onSuccess(item));
         } else {
             LogManager.logError("WEB_SCRAPE", "Không tìm thấy link trong HTML");
             scrapeWebSource(sources, index + 1, item, cb);
+        }
+    }
+
+    private static String getQualityForRetry(int retryCount) {
+        String[] qualities = {"1080", "720", "480", "360"};
+        int idx = Math.min(retryCount, qualities.length - 1);
+        return qualities[idx];
+    }
+
+    private static boolean isDomainInCooldown(int index) {
+        return System.currentTimeMillis() < domainCooldownUntil[index];
+    }
+
+    private static int findNextHealthyDomain(int startIndex) {
+        int start = Math.max(0, startIndex);
+        for (int i = start; i < API_DOMAINS.length; i++) {
+            if (!isDomainInCooldown(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static void markDomainFailure(int index, String reason) {
+        domainFailureCount[index]++;
+        LogManager.log("DOMAIN", "Failure " + API_DOMAINS[index] + " (" + domainFailureCount[index] + ") - " + reason);
+        if (domainFailureCount[index] >= MAX_FAILURES_BEFORE_COOLDOWN) {
+            domainCooldownUntil[index] = System.currentTimeMillis() + COOLDOWN_MS;
+            LogManager.logError("DOMAIN", "Cooldown " + API_DOMAINS[index] + " for " + (COOLDOWN_MS / 60000) + " minutes");
+        }
+    }
+
+    private static void markDomainSuccess(int index) {
+        domainFailureCount[index] = 0;
+        domainCooldownUntil[index] = 0;
+        domainLastSuccess[index] = System.currentTimeMillis();
+    }
+
+    private static void resetDomainCooldowns() {
+        for (int i = 0; i < API_DOMAINS.length; i++) {
+            domainCooldownUntil[i] = 0;
+            domainFailureCount[i] = 0;
         }
     }
 

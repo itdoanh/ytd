@@ -9,10 +9,22 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.widget.Toast;
+import android.net.Uri;
+import android.view.View;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.documentfile.provider.DocumentFile;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import com.my.downloader.databinding.ActivityMainBinding;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.concurrent.TimeUnit;
+import android.content.SharedPreferences;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -21,6 +33,16 @@ public class MainActivity extends AppCompatActivity {
     private ActivityMainBinding binding;
     private List<VideoItem> videoList = new ArrayList<>();
     private VideoAdapter adapter;
+    private ActivityResultLauncher<Uri> folderPickerLauncher;
+    private Uri downloadFolderUri;
+    private int pendingAnalyze = 0;
+
+    private static final String PREFS_NAME = "app_prefs";
+    private static final String KEY_FOLDER_URI = "download_folder_uri";
+    private static final OkHttpClient downloadClient = new OkHttpClient.Builder()
+            .connectTimeout(45, TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
+            .build();
 
     // Lắng nghe khi tải xong để báo chỗ lưu
     private final BroadcastReceiver onDownloadComplete = new BroadcastReceiver() {
@@ -37,6 +59,31 @@ public class MainActivity extends AppCompatActivity {
         setContentView(binding.getRoot());
         
         registerReceiver(onDownloadComplete, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String folderUriStr = prefs.getString(KEY_FOLDER_URI, null);
+        if (folderUriStr != null) {
+            downloadFolderUri = Uri.parse(folderUriStr);
+            updateFolderButtonLabel();
+        }
+
+        folderPickerLauncher = registerForActivityResult(
+                new ActivityResultContracts.OpenDocumentTree(),
+                uri -> {
+                    if (uri != null) {
+                        getContentResolver().takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        );
+                        downloadFolderUri = uri;
+                        prefs.edit().putString(KEY_FOLDER_URI, uri.toString()).apply();
+                        updateFolderButtonLabel();
+                        Toast.makeText(this, "✅ Đã chọn folder lưu", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(this, "⚠️ Chưa chọn folder", Toast.LENGTH_SHORT).show();
+                    }
+                }
+        );
 
         // 1. AUTO TEST API KHI MỞ APP (Kèm hiển thị Log chi tiết)
         binding.toolbar.setTitle("Đang kiểm tra API...");
@@ -61,6 +108,10 @@ public class MainActivity extends AppCompatActivity {
         });
         binding.recyclerView.setLayoutManager(new LinearLayoutManager(this));
         binding.recyclerView.setAdapter(adapter);
+
+        binding.btnChooseFolder.setOnClickListener(v -> {
+            folderPickerLauncher.launch(null);
+        });
 
         // 3. THÊM LINK
         binding.btnAdd.setOnClickListener(v -> {
@@ -98,23 +149,31 @@ public class MainActivity extends AppCompatActivity {
 
         // 4. NÚT START (GỌI ANALYZE)
         binding.btnStartProcess.setOnClickListener(v -> {
-            binding.progressContainer.setVisibility(android.view.View.VISIBLE);
+            binding.progressContainer.setVisibility(View.VISIBLE);
             binding.tvProgressStatus.setText("🚀 Bắt đầu phân tích...");
-            
+
+            pendingAnalyze = 0;
             for(int i=0; i<videoList.size(); i++) {
                 int pos = i;
                 VideoItem item = videoList.get(i);
                 if(!item.isReady) {
+                    pendingAnalyze++;
                     Y2mateHelper.analyze(item, new Y2mateHelper.ApiCallback() {
                         @Override 
                         public void onSuccess(VideoItem result) { 
                             adapter.notifyItemChanged(pos);
-                            binding.progressContainer.setVisibility(android.view.View.GONE);
+                            pendingAnalyze--;
+                            if (pendingAnalyze <= 0) {
+                                binding.progressContainer.setVisibility(View.GONE);
+                            }
                         }
                         
                         @Override 
                         public void onError(String msg) { 
-                            binding.progressContainer.setVisibility(android.view.View.GONE);
+                            pendingAnalyze--;
+                            if (pendingAnalyze <= 0) {
+                                binding.progressContainer.setVisibility(View.GONE);
+                            }
                             showErrorLog("Log lỗi Analyze API", msg); 
                         }
                         
@@ -124,6 +183,11 @@ public class MainActivity extends AppCompatActivity {
                         }
                     });
                 }
+            }
+
+            if (pendingAnalyze == 0) {
+                binding.progressContainer.setVisibility(View.GONE);
+                Toast.makeText(this, "Không có video cần phân tích", Toast.LENGTH_SHORT).show();
             }
         });
 
@@ -162,13 +226,17 @@ public class MainActivity extends AppCompatActivity {
     // Tải Direct Link thật sự
     private void startRealDownload(String dlink, String title, String ext) {
         try {
-            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(dlink));
             String cleanTitle = title.replaceAll("[^a-zA-Z0-9 -]", "") + "." + ext;
-            
+
+            if (downloadFolderUri != null) {
+                startDownloadToFolder(dlink, cleanTitle, ext);
+                return;
+            }
+
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(dlink));
             req.setTitle(cleanTitle);
             req.setDescription("Tiến trình đang chạy...");
             req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            
             req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, cleanTitle);
 
             DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
@@ -178,6 +246,68 @@ public class MainActivity extends AppCompatActivity {
             }
         } catch (Exception e) {
             showErrorLog("Lỗi Trình tải xuống", e.getMessage());
+        }
+    }
+
+    private void startDownloadToFolder(String dlink, String fileName, String ext) {
+        DocumentFile pickedDir = DocumentFile.fromTreeUri(this, downloadFolderUri);
+        if (pickedDir == null || !pickedDir.canWrite()) {
+            showErrorLog("Lỗi Folder", "Không thể ghi vào folder đã chọn");
+            return;
+        }
+
+        String mime = ext.equals("mp3") ? "audio/mpeg" : "video/mp4";
+        DocumentFile file = pickedDir.createFile(mime, fileName);
+        if (file == null) {
+            showErrorLog("Lỗi Folder", "Không thể tạo file trong folder đã chọn");
+            return;
+        }
+
+        Toast.makeText(this, "Đang tải về folder đã chọn...", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                Request request = new Request.Builder().url(dlink).build();
+                Response response = downloadClient.newCall(request).execute();
+                if (!response.isSuccessful() || response.body() == null) {
+                    runOnUiThread(() -> showErrorLog("Lỗi tải", "HTTP " + response.code()));
+                    return;
+                }
+
+                InputStream input = response.body().byteStream();
+                OutputStream output = getContentResolver().openOutputStream(file.getUri());
+                if (output == null) {
+                    runOnUiThread(() -> showErrorLog("Lỗi tải", "Không mở được file"));
+                    return;
+                }
+
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                output.flush();
+                output.close();
+                input.close();
+                response.close();
+
+                runOnUiThread(() -> Toast.makeText(this, "✅ Tải xong vào folder đã chọn", Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> showErrorLog("Lỗi tải", e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void updateFolderButtonLabel() {
+        if (downloadFolderUri == null) {
+            binding.btnChooseFolder.setText("Chọn Folder Lưu");
+            return;
+        }
+        DocumentFile pickedDir = DocumentFile.fromTreeUri(this, downloadFolderUri);
+        String name = pickedDir != null ? pickedDir.getName() : null;
+        if (name == null || name.trim().isEmpty()) {
+            binding.btnChooseFolder.setText("Folder đã chọn");
+        } else {
+            binding.btnChooseFolder.setText("Folder: " + name);
         }
     }
 
