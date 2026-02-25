@@ -71,6 +71,18 @@
             android:layout_marginStart="5dp"/>
     </LinearLayout>
 
+    <!-- Nút Show Debug Log -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnShowLog"
+        style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="10dp"
+        android:text="🔍 Hiển thị Chi Tiết Log (Debug)"
+        android:textColor="#FF9800"
+        app:icon="@android:drawable/ic_menu_info_details"
+        app:iconTint="#FF9800"/>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerView"
         android:layout_width="match_parent"

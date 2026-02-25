@@ -87,6 +87,11 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         });
+
+        // 5. NÚT SHOW DEBUG LOG
+        binding.btnShowLog.setOnClickListener(v -> {
+            showDebugLog();
+        });
     }
 
     // Hiển thị menu chọn chất lượng từ y2mate
@@ -143,6 +148,31 @@ public class MainActivity extends AppCompatActivity {
             .setTitle("⚠️ " + title)
             .setMessage(message)
             .setPositiveButton("Đóng", null)
+            .show();
+    }
+
+    // HÀM HIỆN TOÀN BỘ DEBUG LOG
+    private void showDebugLog() {
+        String allLogs = LogManager.getAllLogs();
+        
+        new AlertDialog.Builder(this)
+            .setTitle("🔍 Debug Log - Chi tiết API")
+            .setMessage(allLogs)
+            .setPositiveButton("Đóng", null)
+            .setNeutralButton("Xóa Log", (dialog, which) -> {
+                LogManager.clearLogs();
+                Toast.makeText(this, "✅ Đã xóa log", Toast.LENGTH_SHORT).show();
+            })
+            .setNegativeButton("Copy Log", (dialog, which) -> {
+                android.content.ClipboardManager clipboard = 
+                    (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                android.content.ClipData clip = 
+                    android.content.ClipData.newPlainText("Debug Log", allLogs);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(clip);
+                    Toast.makeText(this, "✅ Đã copy log vào clipboard", Toast.LENGTH_SHORT).show();
+                }
+            })
             .show();
     }
 
