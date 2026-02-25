@@ -21,7 +21,9 @@ import com.my.downloader.databinding.ActivityMainBinding;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.util.concurrent.TimeUnit;
 import android.content.SharedPreferences;
@@ -34,6 +36,7 @@ public class MainActivity extends AppCompatActivity {
     private List<VideoItem> videoList = new ArrayList<>();
     private VideoAdapter adapter;
     private ActivityResultLauncher<Uri> folderPickerLauncher;
+    private ActivityResultLauncher<String> filePickerLauncher;
     private Uri downloadFolderUri;
     private int pendingAnalyze = 0;
 
@@ -85,6 +88,15 @@ public class MainActivity extends AppCompatActivity {
                 }
         );
 
+        filePickerLauncher = registerForActivityResult(
+                new ActivityResultContracts.GetContent(),
+                uri -> {
+                    if (uri != null) {
+                        loadUrlsFromFile(uri);
+                    }
+                }
+        );
+
         // 1. AUTO TEST API KHI MỞ APP (Kèm hiển thị Log chi tiết)
         binding.toolbar.setTitle("Đang kiểm tra API...");
         Y2mateHelper.testApi((isOnline, logMsg) -> {
@@ -111,6 +123,10 @@ public class MainActivity extends AppCompatActivity {
 
         binding.btnChooseFolder.setOnClickListener(v -> {
             folderPickerLauncher.launch(null);
+        });
+
+        binding.btnLoadFile.setOnClickListener(v -> {
+            filePickerLauncher.launch("text/plain");
         });
 
         // 3. THÊM LINK
@@ -318,6 +334,60 @@ public class MainActivity extends AppCompatActivity {
             .setMessage(message)
             .setPositiveButton("Đóng", null)
             .show();
+    }
+
+    // ĐỌC FILE TXT CHỨA DANH SÁCH LINK YOUTUBE VÀ NẠP VÀO WORKSPACE
+    private void loadUrlsFromFile(Uri fileUri) {
+        new Thread(() -> {
+            try {
+                InputStream inputStream = getContentResolver().openInputStream(fileUri);
+                if (inputStream == null) {
+                    runOnUiThread(() -> showErrorLog("Lỗi đọc file", "Không mở được file"));
+                    return;
+                }
+                BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+                String line;
+                int added = 0;
+                while ((line = reader.readLine()) != null) {
+                    String url = line.trim();
+                    if (url.contains("youtu")) {
+                        VideoItem item = new VideoItem(url);
+                        String videoId = Y2mateHelper.extractVideoIdFromUrl(url);
+                        if (videoId != null) {
+                            item.vid = videoId;
+                            item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                            item.title = "Đang lấy tiêu đề...";
+                        }
+                        videoList.add(item);
+                        final int pos = videoList.size() - 1;
+                        runOnUiThread(() -> adapter.notifyItemInserted(pos));
+                        if (videoId != null) {
+                            Y2mateHelper.fetchYouTubeMeta(url, videoId, new Y2mateHelper.MetaCallback() {
+                                @Override public void onSuccess(String title, String thumbUrl) {
+                                    item.title = title;
+                                    if (thumbUrl != null && !thumbUrl.isEmpty()) {
+                                        item.thumbUrl = thumbUrl;
+                                    }
+                                    runOnUiThread(() -> adapter.notifyItemChanged(pos));
+                                }
+                                @Override public void onError(String msg) {
+                                    item.title = "Không lấy được tiêu đề";
+                                    runOnUiThread(() -> adapter.notifyItemChanged(pos));
+                                }
+                            });
+                        }
+                        added++;
+                    }
+                }
+                reader.close();
+                inputStream.close();
+                final int count = added;
+                runOnUiThread(() -> Toast.makeText(this,
+                        "✅ Đã nạp " + count + " link từ file vào workspace", Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> showErrorLog("Lỗi đọc file", e.getMessage()));
+            }
+        }).start();
     }
 
     // HÀM HIỆN TOÀN BỘ DEBUG LOG

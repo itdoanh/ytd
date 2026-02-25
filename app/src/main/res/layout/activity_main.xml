@@ -71,17 +71,34 @@
             android:layout_marginStart="5dp"/>
     </LinearLayout>
 
-    <!-- Nút Show Debug Log -->
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btnShowLog"
-        style="@style/Widget.MaterialComponents.Button.TextButton"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginHorizontal="10dp"
-        android:text="🔍 Hiển thị Chi Tiết Log (Debug)"
-        android:textColor="#FF9800"
-        app:icon="@android:drawable/ic_menu_info_details"
-        app:iconTint="#FF9800"/>
+        android:orientation="horizontal"
+        android:paddingHorizontal="10dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLoadFile"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="📂 Load File (URLs)"
+            android:layout_marginEnd="5dp"/>
+
+        <!-- Nút Show Debug Log -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnShowLog"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="5dp"
+            android:text="🔍 Debug Log"
+            android:textColor="#FF9800"
+            app:icon="@android:drawable/ic_menu_info_details"
+            app:iconTint="#FF9800"/>
+    </LinearLayout>
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/recyclerView"
