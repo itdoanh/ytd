@@ -44,6 +44,16 @@
             android:text="+"
             android:textSize="24sp"
             app:cornerRadius="8dp"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLoadFile"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="60dp"
+            android:layout_height="55dp"
+            android:layout_marginStart="4dp"
+            android:text="📂"
+            android:textSize="20sp"
+            app:cornerRadius="8dp"/>
     </LinearLayout>
 
     <LinearLayout
