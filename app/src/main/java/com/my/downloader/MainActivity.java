@@ -9,7 +9,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.widget.Toast;
-import android.net.Uri;
 import android.view.View;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -21,7 +20,9 @@ import com.my.downloader.databinding.ActivityMainBinding;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.util.concurrent.TimeUnit;
 import android.content.SharedPreferences;
@@ -34,6 +35,7 @@ public class MainActivity extends AppCompatActivity {
     private List<VideoItem> videoList = new ArrayList<>();
     private VideoAdapter adapter;
     private ActivityResultLauncher<Uri> folderPickerLauncher;
+    private ActivityResultLauncher<String[]> filePickerLauncher;
     private Uri downloadFolderUri;
     private int pendingAnalyze = 0;
 
@@ -85,6 +87,15 @@ public class MainActivity extends AppCompatActivity {
                 }
         );
 
+        filePickerLauncher = registerForActivityResult(
+                new ActivityResultContracts.OpenDocument(),
+                uri -> {
+                    if (uri != null) {
+                        loadUrlsFromFile(uri);
+                    }
+                }
+        );
+
         // 1. AUTO TEST API KHI MỞ APP (Kèm hiển thị Log chi tiết)
         binding.toolbar.setTitle("Đang kiểm tra API...");
         Y2mateHelper.testApi((isOnline, logMsg) -> {
@@ -111,6 +122,10 @@ public class MainActivity extends AppCompatActivity {
 
         binding.btnChooseFolder.setOnClickListener(v -> {
             folderPickerLauncher.launch(null);
+        });
+
+        binding.btnLoadFile.setOnClickListener(v -> {
+            filePickerLauncher.launch(new String[]{"text/plain", "text/*", "*/*"});
         });
 
         // 3. THÊM LINK
@@ -195,6 +210,64 @@ public class MainActivity extends AppCompatActivity {
         binding.btnShowLog.setOnClickListener(v -> {
             showDebugLog();
         });
+    }
+
+    // Đọc file text và thêm các link YouTube vào danh sách
+    private void loadUrlsFromFile(Uri fileUri) {
+        try {
+            InputStream inputStream = getContentResolver().openInputStream(fileUri);
+            if (inputStream == null) {
+                Toast.makeText(this, "⚠️ Không mở được file", Toast.LENGTH_SHORT).show();
+                return;
+            }
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+            String line;
+            int addedCount = 0;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.contains("youtu")) {
+                    VideoItem item = new VideoItem(line);
+                    String videoId = Y2mateHelper.extractVideoIdFromUrl(line);
+                    if (videoId != null) {
+                        item.vid = videoId;
+                        item.thumbUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                        item.title = "Đang lấy tiêu đề...";
+                    }
+                    videoList.add(item);
+                    int pos = videoList.size() - 1;
+                    adapter.notifyItemInserted(pos);
+                    addedCount++;
+                    if (videoId != null) {
+                        final VideoItem finalItem = item;
+                        final int finalPos = pos;
+                        Y2mateHelper.fetchYouTubeMeta(line, videoId, new Y2mateHelper.MetaCallback() {
+                            @Override public void onSuccess(String title, String thumbUrl) {
+                                finalItem.title = title;
+                                if (thumbUrl != null && !thumbUrl.isEmpty()) {
+                                    finalItem.thumbUrl = thumbUrl;
+                                }
+                                adapter.notifyItemChanged(finalPos);
+                            }
+                            @Override public void onError(String msg) {
+                                finalItem.title = "Không lấy được tiêu đề";
+                                adapter.notifyItemChanged(finalPos);
+                            }
+                        });
+                    }
+                }
+            }
+            reader.close();
+            inputStream.close();
+
+            if (addedCount > 0) {
+                Toast.makeText(this, "✅ Đã thêm " + addedCount + " link từ file", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "⚠️ Không tìm thấy link YouTube trong file", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            showErrorLog("Lỗi đọc file", e.getMessage());
+        }
     }
 
     // Hiển thị menu chọn chất lượng từ y2mate
