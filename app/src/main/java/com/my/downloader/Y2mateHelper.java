@@ -8,7 +8,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import java.io.IOException;
 import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -57,8 +56,16 @@ public class Y2mateHelper {
     }
 
     public static void fetchYouTubeMeta(String url, String videoId, MetaCallback cb) {
-        String oembedUrl = "https://www.youtube.com/oembed?format=json&url="
-                + URLEncoder.encode(url, StandardCharsets.UTF_8.name());
+        String oembedUrl;
+        try {
+            oembedUrl = "https://www.youtube.com/oembed?format=json&url="
+                    + URLEncoder.encode(url, "UTF-8");
+        } catch (Exception e) {
+            LogManager.logError("YT_META", "Encode URL error: " + e.getMessage());
+            mainHandler.post(() -> cb.onError("❌ Lỗi encode URL"));
+            return;
+        }
+        
         LogManager.logRequest(oembedUrl, "GET", "-");
 
         Request req = new Request.Builder()
