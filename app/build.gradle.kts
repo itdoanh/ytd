@@ -43,4 +43,5 @@ dependencies {
     // Thư viện mạng & JSON
     implementation("com.squareup.okhttp3:okhttp:4.10.0")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("org.json:json:20231013") // Thêm JSON parsing
 }
